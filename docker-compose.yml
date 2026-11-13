@@ -1,0 +1,202 @@
+services:
+  # ============================================================================
+  # 1. Relational Database: PostgreSQL 16
+  # ============================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: docintel-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_password_change_me}
+      POSTGRES_DB: ${POSTGRES_DB:-doc_intelligence}
+    ports:
+      - "${HOST_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-doc_intelligence}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ============================================================================
+  # 2. In-Memory Cache & Message Broker: Redis 7
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: docintel-redis
+    restart: unless-stopped
+    command: >
+      sh -c '
+      if [ -n "${REDIS_PASSWORD}" ]; then
+        redis-server --requirepass "${REDIS_PASSWORD}" --appendonly yes
+      else
+        redis-server --appendonly yes
+      fi
+      '
+    ports:
+      - "${HOST_REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - app-network
+    healthcheck:
+      test: >
+        sh -c '
+        if [ -n "${REDIS_PASSWORD}" ]; then
+          redis-cli -a "${REDIS_PASSWORD}" ping | grep PONG
+        else
+          redis-cli ping | grep PONG
+        fi
+        '
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ============================================================================
+  # 3. Vector Database: Qdrant
+  # ============================================================================
+  qdrant:
+    image: qdrant/qdrant:v1.12.0
+    container_name: docintel-qdrant
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:-}
+    ports:
+      - "${HOST_QDRANT_HTTP_PORT:-6333}:6333"
+      - "${HOST_QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:6333/readyz || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ============================================================================
+  # 4. FastAPI Backend Application
+  # ============================================================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: docintel-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    environment:
+      - POSTGRES_SERVER=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres_password_change_me}
+      - POSTGRES_DB=${POSTGRES_DB:-doc_intelligence}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_GRPC_PORT=6334
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - SECRET_KEY=${SECRET_KEY:-dev-insecure-secret-key-replace-in-production-min-32-chars}
+      - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS:-["http://localhost:5173","http://127.0.0.1:5173"]}
+    ports:
+      - "${HOST_BACKEND_PORT:-8000}:8000"
+    volumes:
+      - document_storage:/app/storage
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/v1/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ============================================================================
+  # 5. Celery Asynchronous Ingestion Worker
+  # ============================================================================
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: docintel-celery-worker
+    restart: unless-stopped
+    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "--loglevel=INFO", "-c", "2"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    environment:
+      - POSTGRES_SERVER=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres_password_change_me}
+      - POSTGRES_DB=${POSTGRES_DB:-doc_intelligence}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_GRPC_PORT=6334
+      - QDRANT_API_KEY=${QDRANT_API_KEY:-}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - SECRET_KEY=${SECRET_KEY:-dev-insecure-secret-key-replace-in-production-min-32-chars}
+    volumes:
+      - document_storage:/app/storage
+    networks:
+      - app-network
+
+  # ============================================================================
+  # 6. React Vite Frontend Application
+  # ============================================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: docintel-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      - VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://localhost:8000}
+    ports:
+      - "${HOST_FRONTEND_PORT:-5173}:5173"
+    networks:
+      - app-network
+
+# ==============================================================================
+# Persistent Named Volumes
+# ==============================================================================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  qdrant_data:
+    driver: local
+  document_storage:
+    driver: local
+
+# ==============================================================================
+# Isolated Internal Network
+# ==============================================================================
+networks:
+  app-network:
+    driver: bridge

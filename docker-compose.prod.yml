@@ -1,0 +1,292 @@
+# ==============================================================================
+# Multi-Tenant Enterprise Document Intelligence Platform - Production Compose
+# ==============================================================================
+# Production deployment on a single cloud VPS or container instance.
+# Public exposure is strictly restricted to Nginx (ports 80 & 443).
+# All data backends (PostgreSQL, Redis, Qdrant, Backend) communicate over an isolated bridge network.
+
+services:
+  # ----------------------------------------------------------------------------
+  # 1. Relational Database: PostgreSQL 16 with Persistent Volume & Role Bootstrap
+  # ----------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: docintel-prod-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?Required production postgres password}
+      POSTGRES_DB: ${POSTGRES_DB:-doc_intelligence}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_prod_db.sql:/docker-entrypoint-initdb.d/init_prod_db.sql:ro
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 2048M
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_ADMIN_USER:-postgres} -d ${POSTGRES_DB:-doc_intelligence}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ----------------------------------------------------------------------------
+  # 2. In-Memory Cache & Task Broker: Redis 7
+  # ----------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: docintel-prod-redis
+    restart: unless-stopped
+    command: >
+      sh -c '
+      if [ -n "${REDIS_PASSWORD}" ]; then
+        redis-server --requirepass "${REDIS_PASSWORD}" --appendonly yes --maxmemory 512mb --maxmemory-policy volatile-lru
+      else
+        redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy volatile-lru
+      fi
+      '
+    volumes:
+      - redis_data:/data
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 768M
+    healthcheck:
+      test: >
+        sh -c '
+        if [ -n "${REDIS_PASSWORD}" ]; then
+          redis-cli -a "${REDIS_PASSWORD}" ping | grep PONG
+        else
+          redis-cli ping | grep PONG
+        fi
+        '
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------------------------
+  # 3. Vector Database: Qdrant
+  # ----------------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:v1.12.0
+    container_name: docintel-prod-qdrant
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?Required production Qdrant API key}
+      QDRANT__STORAGE__PERFORMANCE__MAX_SEARCH_THREADS: 2
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 2048M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:6333/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ----------------------------------------------------------------------------
+  # 4. Database Migrations Runner (Runs Alembic before backend starts)
+  # ----------------------------------------------------------------------------
+  migration:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: docintel-prod-migration
+    restart: "no"
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - POSTGRES_SERVER=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=${POSTGRES_ADMIN_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_ADMIN_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB:-doc_intelligence}
+      - SYNC_DATABASE_URL_OVERRIDE=postgresql+psycopg2://${POSTGRES_ADMIN_USER:-postgres}:${POSTGRES_ADMIN_PASSWORD}@postgres:5432/${POSTGRES_DB:-doc_intelligence}
+    networks:
+      - app-network
+
+  # ----------------------------------------------------------------------------
+  # 5. FastAPI Backend Application (Non-root, docintel_app least-privilege role)
+  # ----------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: docintel-prod-backend
+    restart: unless-stopped
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--proxy-headers", "--forwarded-allow-ips", "*"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    environment:
+      - ENVIRONMENT=production
+      - DEBUG=False
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - SECRET_KEY=${SECRET_KEY:?Required production JWT secret key}
+      - POSTGRES_SERVER=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=docintel_app
+      - POSTGRES_PASSWORD=${POSTGRES_APP_PASSWORD:-docintel_secure_pass_2026}
+      - POSTGRES_DB=${POSTGRES_DB:-doc_intelligence}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - COOKIE_SECURE=True
+      - COOKIE_SAMESITE=lax
+      - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS:-["http://localhost","https://localhost"]}
+      - RATE_LIMIT_FALLBACK_POLICY=memory
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    volumes:
+      - document_storage:/app/storage
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 3072M
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/v1/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # ----------------------------------------------------------------------------
+  # 6. Celery Background Ingestion Worker
+  # ----------------------------------------------------------------------------
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: docintel-prod-celery-worker
+    restart: unless-stopped
+    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "--loglevel=INFO", "-c", "2"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      migration:
+        condition: service_completed_successfully
+    environment:
+      - ENVIRONMENT=production
+      - DEBUG=False
+      - POSTGRES_SERVER=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_USER=docintel_app
+      - POSTGRES_PASSWORD=${POSTGRES_APP_PASSWORD:-docintel_secure_pass_2026}
+      - POSTGRES_DB=${POSTGRES_DB:-doc_intelligence}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+    volumes:
+      - document_storage:/app/storage
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 3072M
+
+  # ----------------------------------------------------------------------------
+  # 7. React Production Frontend (Nginx static serving)
+  # ----------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: production
+      args:
+        - VITE_API_BASE_URL=
+    container_name: docintel-prod-frontend
+    restart: unless-stopped
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  # ----------------------------------------------------------------------------
+  # 8. Edge Reverse Proxy: Nginx with SSE Buffer Disabling & SSL
+  # ----------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: docintel-prod-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - certbot_www:/var/www/certbot:ro
+      - certbot_conf:/etc/letsencrypt:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - app-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+# ==============================================================================
+# Persistent Named Volumes (Host Survives Container Restarts & Upgrades)
+# ==============================================================================
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  qdrant_data:
+    driver: local
+  document_storage:
+    driver: local
+  certbot_www:
+    driver: local
+  certbot_conf:
+    driver: local
+
+# ==============================================================================
+# Private Isolated Application Network
+# ==============================================================================
+networks:
+  app-network:
+    driver: bridge
