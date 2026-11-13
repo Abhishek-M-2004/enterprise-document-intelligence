@@ -82,34 +82,34 @@ This platform implements an enterprise-hardened **modular monolith** that guaran
 ```mermaid
 flowchart TD
     subgraph ClientLayer ["Client Presentation Layer (Port 80 / 443)"]
-        Browser["React 18 SPA (Vite + Tailwind CSS)\n- AuthContext (In-Memory Access Tokens)\n- SSE Streaming Chat & PDF Viewer\n- Evaluation & Search Workbenches"]
+        Browser["React 18 SPA (Vite + Tailwind CSS)<br/>- AuthContext In-Memory Access Tokens<br/>- SSE Streaming Chat & PDF Viewer<br/>- Evaluation & Search Workbenches"]
     end
 
     subgraph IngressLayer ["Ingress & Reverse Proxy (Port 80 / 443)"]
-        Nginx["Nginx 1.25 Edge Reverse Proxy\n- TLS Termination & Security Headers\n- 50MB PDF Upload Ceiling\n- SSE proxy_buffering off;"]
+        Nginx["Nginx 1.25 Edge Reverse Proxy<br/>- TLS Termination & Security Headers<br/>- 50MB PDF Upload Ceiling<br/>- SSE proxy_buffering off"]
     end
 
     subgraph AppLayer ["Modular Monolith Application Layer (Port 8000)"]
-        FastAPI["FastAPI Backend (Python 3.12)\n- Argon2id Auth & JWT Rotation\n- Multi-Tenant RLS Session Context\n- Redis Sliding-Window Rate Limiting\n- Prometheus Telemetry (/metrics)"]
-        CeleryWorker["Celery Background Worker\n- PyMuPDF Text Extraction\n- Token-Aware Sliding Window Chunking\n- BGE Embedding Generation\n- Batch Ragas Evaluation Jobs"]
+        FastAPI["FastAPI Backend (Python 3.12)<br/>- Argon2id Auth & JWT Rotation<br/>- Multi-Tenant RLS Session Context<br/>- Redis Sliding-Window Rate Limiting<br/>- Prometheus Telemetry (/metrics)"]
+        CeleryWorker["Celery Background Worker<br/>- PyMuPDF Text Extraction<br/>- Token-Aware Sliding Window Chunking<br/>- BGE Embedding Generation<br/>- Batch Ragas Evaluation Jobs"]
     end
 
     subgraph StorageLayer ["Data Storage & Isolation Layer"]
-        PG[("PostgreSQL 16 (Port 5432)\n- docintel_app (NOSUPERUSER, NOBYPASSRLS)\n- FORCE ROW LEVEL SECURITY\n- 54 Verified Indexes (0.67ms latency)")]
-        QdrantDB[("Qdrant Vector DB (Port 6333)\n- HNSW Graph Index (Cosine)\n- 384-d BGE-small Embeddings\n- Mandatory tenant_id Payload Filter")]
-        RedisDB[("Redis 7 (Port 6379)\n- Celery Message Broker\n- Sliding-Window Rate Limit Counters\n- Token Revocation Blacklist")]
+        PG[("PostgreSQL 16 (Port 5432)<br/>- docintel_app (NOSUPERUSER, NOBYPASSRLS)<br/>- FORCE ROW LEVEL SECURITY<br/>- 54 Verified Indexes (0.67ms latency)")]
+        QdrantDB[("Qdrant Vector DB (Port 6333)<br/>- HNSW Graph Index (Cosine)<br/>- 384-d BGE-small Embeddings<br/>- Mandatory tenant_id Payload Filter")]
+        RedisDB[("Redis 7 (Port 6379)<br/>- Celery Message Broker<br/>- Sliding-Window Rate Limit Counters<br/>- Token Revocation Blacklist")]
     end
 
-    Browser -->|HTTPS / WSS| Nginx
-    Nginx -->|/ (Static SPA Assets)| Browser
-    Nginx -->|/api/* (REST & SSE Stream)| FastAPI
-    FastAPI -->|Async Tasks| RedisDB
-    RedisDB -->|Pulls Tasks| CeleryWorker
-    FastAPI -->|SET LOCAL app.current_tenant_id| PG
-    CeleryWorker -->|Persist Chunks & Metadata| PG
-    FastAPI -->|Hybrid Vector Search| QdrantDB
-    CeleryWorker -->|Batch Upsert Embeddings| QdrantDB
-    FastAPI -->|Rate Limits & Blacklist| RedisDB
+    Browser -->|"HTTPS / WSS"| Nginx
+    Nginx -->|"Static SPA Assets"| Browser
+    Nginx -->|"REST & SSE APIs"| FastAPI
+    FastAPI -->|"Async Ingestion Tasks"| RedisDB
+    RedisDB -->|"Pulls Tasks"| CeleryWorker
+    FastAPI -->|"SET LOCAL app.current_tenant_id"| PG
+    CeleryWorker -->|"Persist Chunks & Metadata"| PG
+    FastAPI -->|"Hybrid Vector Search"| QdrantDB
+    CeleryWorker -->|"Batch Upsert Embeddings"| QdrantDB
+    FastAPI -->|"Rate Limits & Blacklist"| RedisDB
 ```
 
 ---
@@ -130,23 +130,23 @@ sequenceDiagram
     participant PG as PostgreSQL (RLS Enforced)
 
     User->>API: POST /api/v1/documents/upload (PDF File)
-    API->>API: Validate MIME (application/pdf) & Size (<=50MB)
+    API->>API: Validate MIME (application/pdf) and Size (Max 50MB)
     API->>API: Compute SHA-256 Checksum (Deduplication)
-    API->>Disk: Write raw PDF to /storage/documents/{tenant_id}/
-    API->>PG: INSERT INTO documents (status="PENDING")
-    API->>Redis: Dispatch celery_task: ingest_document(doc_id)
-    API-->>User: HTTP 202 Accepted {document_id, status: "PENDING"}
+    API->>Disk: Write raw PDF to storage
+    API->>PG: INSERT INTO documents (status PENDING)
+    API->>Redis: Dispatch celery task: ingest_document
+    API-->>User: HTTP 202 Accepted (status PENDING)
 
     Redis->>Celery: Pull ingest_document task
-    Celery->>PG: UPDATE documents SET status="PROCESSING"
-    Celery->>PyMuPDF: Parse document pages & extract text (1.88ms)
+    Celery->>PG: UPDATE documents SET status PROCESSING
+    Celery->>PyMuPDF: Parse document pages and extract text
     PyMuPDF-->>Celery: Structured text with 1-based page offsets
     Celery->>Celery: Chunk text (512 tokens window, 50 tokens overlap)
-    Celery->>BGE: Generate 384-d dense embeddings (BAAI/bge-small-en-v1.5)
+    Celery->>BGE: Generate 384-d dense embeddings (BGE-small)
     BGE-->>Celery: Normalized vector embeddings
-    Celery->>Qdrant: Upsert points with payload: {tenant_id, doc_id, page_no}
-    Celery->>PG: Batch INSERT INTO document_chunks (tenant_id, text, page_no)
-    Celery->>PG: UPDATE documents SET status="COMPLETED"
+    Celery->>Qdrant: Upsert points with payload: tenant_id, doc_id, page_no
+    Celery->>PG: Batch INSERT INTO document_chunks
+    Celery->>PG: UPDATE documents SET status COMPLETED
 ```
 
 ---
@@ -155,25 +155,25 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    UserQuery["User Natural Language Query"] --> AuthCheck["FastAPI Tenant Authentication\n(Validate Membership & Set DB Tenant Context)"]
+    UserQuery["User Natural Language Query"] --> AuthCheck["FastAPI Tenant Authentication<br/>Validate Membership & Set DB Tenant Context"]
     
     AuthCheck --> ParallelRet{"Parallel Retrieval Dispatch"}
     
-    ParallelRet -->|Track 1: Dense Semantic| DenseTrack["BGE-small Embedding (384-dim)\nQdrant HNSW ANN Search\nFilter: tenant_id == current_tenant_id"]
-    ParallelRet -->|Track 2: Sparse Lexical| SparseTrack["BM25Okapi Lexical Search\nTokenized Chunk Vocabulary\nStopword & Punctuation Filtering"]
+    ParallelRet -->|"Track 1: Dense Semantic"| DenseTrack["BGE-small Embedding (384-dim)<br/>Qdrant HNSW ANN Search<br/>Filter: tenant_id == current_tenant_id"]
+    ParallelRet -->|"Track 2: Sparse Lexical"| SparseTrack["BM25Okapi Lexical Search<br/>Tokenized Chunk Vocabulary<br/>Stopword & Punctuation Filtering"]
     
-    DenseTrack -->|Top 50 Vector Candidates| FusionNode["Reciprocal Rank Fusion (RRF, k=60)\nRRF(d) = Σ w_m / (60 + r_m(d))"]
-    SparseTrack -->|Top 50 Lexical Candidates| FusionNode
+    DenseTrack -->|"Top 50 Vector Candidates"| FusionNode["Reciprocal Rank Fusion (RRF, k=60)<br/>RRF Score = Sum(weight / (60 + rank))"]
+    SparseTrack -->|"Top 50 Lexical Candidates"| FusionNode
     
-    FusionNode -->|Top 15 Fused Candidates| RerankNode["BGE Cross-Encoder Reranker\n(BAAI/bge-reranker-base)\nJoint Self-Attention over (Query, Chunk) pairs"]
+    FusionNode -->|"Top 15 Fused Candidates"| RerankNode["BGE Cross-Encoder Reranker<br/>(BAAI/bge-reranker-base)<br/>Joint Self-Attention over Candidate Pairs"]
     
-    RerankNode -->|Top 5 Calibrated Passages| CtxBuilder["ContextBuilder\nWraps Passages as [SOURCE: S1], [SOURCE: S2]\nInjects Anti-Injection Guardrails"]
+    RerankNode -->|"Top 5 Calibrated Passages"| CtxBuilder["ContextBuilder<br/>Wraps Passages as [SOURCE: S1], [SOURCE: S2]<br/>Injects Anti-Injection Guardrails"]
     
-    CtxBuilder --> LLMStream["OpenAI LLM Inference (GPT-4o-mini)\nStreaming Token Generation"]
+    CtxBuilder --> LLMStream["OpenAI LLM Inference (GPT-4o-mini)<br/>Streaming Token Generation"]
     
-    LLMStream --> CitValidator["CitationService\nIntercepts Stream, Regex Matches [S*]\nStrips Hallucinated Tags\nResolves Page Numbers & Filenames"]
+    LLMStream --> CitValidator["CitationService<br/>Intercepts Stream, Regex Matches [S*]<br/>Strips Hallucinated Tags<br/>Resolves Page Numbers & Filenames"]
     
-    CitValidator --> SSE["Server-Sent Events (SSE) Stream to Client\nevent: status -> event: token -> event: done"]
+    CitValidator --> SSE["Server-Sent Events (SSE) Stream to Client<br/>status -> token -> done"]
 ```
 
 ---
@@ -183,36 +183,36 @@ flowchart TD
 ```mermaid
 flowchart TD
     subgraph RequestContext ["1. Authenticated Request Context"]
-        Req["HTTP Request\nHeader: Authorization: Bearer <jwt>\nHeader: X-Tenant-ID: <uuid>"]
+        Req["HTTP Request<br/>Header: Authorization: Bearer JWT<br/>Header: X-Tenant-ID: UUID"]
     end
 
     subgraph AppValidation ["2. Application Layer Authorization"]
         JWTVerify["Verify JWT Expiration & Signature"]
-        TenantVerify{"Query PostgreSQL memberships:\nDoes (user_id, tenant_id) exist?"}
-        Reject403["HTTP 403 Forbidden\nAccess Denied"]
+        TenantVerify{"Query PostgreSQL memberships:<br/>Does user_id have active membership?"}
+        Reject403["HTTP 403 Forbidden<br/>Access Denied"]
     end
 
     subgraph DatabaseEnclave ["3. PostgreSQL Engine Enclave"]
-        AppRole["FastAPI connects as unprivileged user:\ndocintel_app (NOSUPERUSER, NOBYPASSRLS)"]
-        SetTenant["Execute: SELECT set_config('app.current_tenant_id', :tid, false)"]
-        RLSPolicy["PostgreSQL Kernel Policy Evaluation:\nFORCE ROW LEVEL SECURITY\nWHERE tenant_id = current_setting('app.current_tenant_id')::uuid"]
-        Tables[("Tenant-Owned Tables\n- documents\n- document_chunks\n- chat_sessions\n- chat_messages\n- evaluation_datasets")]
-        ResetTenant["Teardown (finally block):\nExecute: RESET app.current_tenant_id"]
+        AppRole["FastAPI connects as unprivileged user:<br/>docintel_app (NOSUPERUSER, NOBYPASSRLS)"]
+        SetTenant["Execute: SELECT set_config('app.current_tenant_id', tid, false)"]
+        RLSPolicy["PostgreSQL Kernel Policy Evaluation:<br/>FORCE ROW LEVEL SECURITY<br/>WHERE tenant_id = current_setting('app.current_tenant_id')::uuid"]
+        Tables[("Tenant-Owned Tables<br/>- documents<br/>- document_chunks<br/>- chat_sessions<br/>- chat_messages<br/>- evaluation_datasets")]
+        ResetTenant["Teardown (finally block):<br/>Execute: RESET app.current_tenant_id"]
     end
 
     subgraph VectorEnclave ["4. Qdrant Vector Enclave"]
-        QdrantFilter["Mandatory Payload Filter:\nFieldCondition(key='tenant_id', match=MatchValue(value=tid))"]
+        QdrantFilter["Mandatory Payload Filter:<br/>tenant_id match current_tenant_id"]
     end
 
     Req --> JWTVerify
     JWTVerify --> TenantVerify
-    TenantVerify -->|No| Reject403
-    TenantVerify -->|Yes| AppRole
+    TenantVerify -->|"No"| Reject403
+    TenantVerify -->|"Yes"| AppRole
     AppRole --> SetTenant
     SetTenant --> RLSPolicy
     RLSPolicy --> Tables
     Tables --> ResetTenant
-    TenantVerify -->|Yes| QdrantFilter
+    TenantVerify -->|"Yes"| QdrantFilter
 ```
 
 ---

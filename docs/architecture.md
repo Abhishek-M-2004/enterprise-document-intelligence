@@ -66,7 +66,7 @@ flowchart TD
     UI --> Router
     Router --> AuthCtx
     AuthCtx --> Axios
-    Axios -->|HTTP + Cookies| FastAPI
+    Axios -->|"HTTP + Cookies"| FastAPI
     FastAPI --> CORS
     CORS --> V1Router
     V1Router --> AuthEP
@@ -645,10 +645,10 @@ flowchart TD
     RunInit --> SampleLoop["Iterate Evaluation Samples"]
     SampleLoop --> StratExec{"Retrieval Strategy"}
     
-    StratExec -->|Vector| VecSearch["Qdrant Vector Search"]
-    StratExec -->|BM25| LexSearch["BM25Okapi Search"]
-    StratExec -->|Hybrid RRF| RRFSearch["Dense + BM25 Fusion (k=60)"]
-    StratExec -->|Hybrid + Rerank| RerankSearch["RRF Candidates + BGE Cross-Encoder"]
+    StratExec -->|"Vector"| VecSearch["Qdrant Vector Search"]
+    StratExec -->|"BM25"| LexSearch["BM25Okapi Search"]
+    StratExec -->|"Hybrid RRF"| RRFSearch["Dense + BM25 Fusion (k=60)"]
+    StratExec -->|"Hybrid + Rerank"| RerankSearch["RRF Candidates + BGE Cross-Encoder"]
     
     VecSearch --> CtxGen["ContextBuilder & LLM Answer Generation"]
     LexSearch --> CtxGen
