@@ -254,7 +254,9 @@ async def stream_chat_message(
             ):
                 event_name = chunk.get("event", "message")
                 data_payload = chunk.get("data", "")
-                if isinstance(data_payload, (dict, list)):
+                if event_name == "token" and isinstance(data_payload, str):
+                    data_str = json.dumps({"token": data_payload})
+                elif isinstance(data_payload, (dict, list)):
                     data_str = json.dumps(data_payload)
                 else:
                     data_str = str(data_payload)

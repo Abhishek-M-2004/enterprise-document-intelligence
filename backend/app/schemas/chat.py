@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 import uuid
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ChatSessionCreate(BaseModel):
@@ -95,6 +95,18 @@ class AskQuestionRequest(BaseModel):
 
 class SendMessageRequest(BaseModel):
     """Payload to post a new message to an existing conversation thread."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def allow_question_alias(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "content" not in data:
+                if "question" in data:
+                    data["content"] = data["question"]
+                elif "query" in data:
+                    data["content"] = data["query"]
+        return data
+
     content: str = Field(
         ...,
         min_length=1,

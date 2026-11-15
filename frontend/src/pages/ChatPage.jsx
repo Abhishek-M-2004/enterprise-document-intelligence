@@ -32,7 +32,7 @@ import Button from '../components/ui/Button';
 import Modal from '../components/ui/Modal';
 
 export default function ChatPage() {
-  const { currentTenant, user } = useAuth();
+  const { currentTenant, user, accessToken } = useAuth();
   const { sessionId: routeSessionId } = useParams();
   const navigate = useNavigate();
 
@@ -190,6 +190,7 @@ export default function ChatPage() {
     setError(null);
 
     const payload = {
+      content: prompt,
       question: prompt,
       top_k: Number(topK),
       document_ids: selectedDocId ? [selectedDocId] : null,
@@ -212,17 +213,47 @@ export default function ChatPage() {
 
       try {
         const streamUrl = chatApi.getStreamUrl(currentSessionId);
-        const tenantId = currentTenant?.tenant_id || currentTenant?.id;
+        const tenantId = currentTenant?.tenant_id || currentTenant?.id || sessionStorage.getItem('active_tenant_id');
+        let token = accessToken || sessionStorage.getItem('access_token');
 
-        const response = await fetch(streamUrl, {
-          method: 'POST',
-          headers: {
+        const buildHeaders = (authToken) => {
+          const h = {
             'Content-Type': 'application/json',
-            'X-Tenant-ID': tenantId,
-          },
+          };
+          if (tenantId) {
+            h['X-Tenant-ID'] = tenantId;
+          }
+          if (authToken) {
+            h['Authorization'] = `Bearer ${authToken}`;
+          }
+          return h;
+        };
+
+        let response = await fetch(streamUrl, {
+          method: 'POST',
+          headers: buildHeaders(token),
           credentials: 'include',
           body: JSON.stringify(payload),
         });
+
+        // If 401 Unauthorized, attempt background token refresh and retry
+        if (response.status === 401) {
+          try {
+            const refreshRes = await authApi.refresh();
+            const newToken = refreshRes.data?.access_token || sessionStorage.getItem('access_token');
+            if (newToken) {
+              token = newToken;
+              response = await fetch(streamUrl, {
+                method: 'POST',
+                headers: buildHeaders(token),
+                credentials: 'include',
+                body: JSON.stringify(payload),
+              });
+            }
+          } catch (refreshErr) {
+            // Let original response flow through
+          }
+        }
 
         if (!response.ok) {
           const errData = await response.json().catch(() => ({}));
@@ -235,41 +266,52 @@ export default function ChatPage() {
         let finalCitations = [];
         let finalMetrics = {};
         let finalFollowups = [];
+        let buffer = '';
 
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
 
-          const chunk = decoder.decode(value, { stream: true });
-          const lines = chunk.split('\n');
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
 
-          let event = 'message';
+          let currentEvent = 'message';
           for (let i = 0; i < lines.length; i++) {
-            const line = lines[i].trim();
-            if (line.startsWith('event:')) {
-              event = line.replace('event:', '').trim();
-            } else if (line.startsWith('data:')) {
-              const rawData = line.replace('data:', '').trim();
-              if (event === 'token') {
+            const rawLine = lines[i];
+            const trimmedLine = rawLine.trim();
+            if (!trimmedLine) continue;
+
+            if (trimmedLine.startsWith('event:')) {
+              currentEvent = trimmedLine.replace('event:', '').trim();
+            } else if (rawLine.startsWith('data:') || trimmedLine.startsWith('data:')) {
+              let rawData = rawLine.startsWith('data:') ? rawLine.slice(5) : trimmedLine.slice(5);
+              if (rawData.startsWith(' ')) {
+                rawData = rawData.slice(1);
+              }
+
+              if (currentEvent === 'token') {
+                let tokenText = '';
                 try {
                   const parsed = JSON.parse(rawData);
-                  accumulatedTokens += parsed.token || '';
+                  tokenText = parsed.token !== undefined ? parsed.token : (typeof parsed === 'string' ? parsed : rawData);
                 } catch {
-                  accumulatedTokens += rawData;
+                  tokenText = rawData;
                 }
+                accumulatedTokens += tokenText;
                 setMessages((prev) =>
                   prev.map((m) =>
                     m.id === assistantMsgId ? { ...m, content: accumulatedTokens } : m
                   )
                 );
-              } else if (event === 'done') {
+              } else if (currentEvent === 'done') {
                 try {
                   const parsed = JSON.parse(rawData);
                   finalCitations = parsed.citations || [];
                   finalMetrics = parsed.metrics || {};
                   finalFollowups = parsed.followup_suggestions || [];
                 } catch {}
-              } else if (event === 'error') {
+              } else if (currentEvent === 'error') {
                 try {
                   const parsedErr = JSON.parse(rawData);
                   setError(parsedErr.error || 'Streaming error');
@@ -298,6 +340,7 @@ export default function ChatPage() {
         loadSessions();
       } catch (err) {
         setError(err.message || 'Error occurred during streaming generation.');
+        setMessages((prev) => prev.filter((m) => m.id !== assistantMsgId));
       } finally {
         setIsLoading(false);
       }

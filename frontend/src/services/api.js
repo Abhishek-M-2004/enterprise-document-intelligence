@@ -15,10 +15,16 @@ export const apiClient = axios.create({
   },
 });
 
-let getAccessToken = () => null;
-let getActiveTenantId = () => null;
+let currentAccessToken = null;
+let currentTenantId = null;
+let getAccessToken = () => currentAccessToken;
+let getActiveTenantId = () => currentTenantId;
 let onTokenRefreshed = () => { };
 let onAuthFailed = () => { };
+
+export const setApiAccessToken = (token) => {
+  currentAccessToken = token;
+};
 
 export const configureApiAuth = (callbacks) => {
   if (callbacks.getAccessToken) getAccessToken = callbacks.getAccessToken;
@@ -30,13 +36,26 @@ export const configureApiAuth = (callbacks) => {
 // Request interceptor: attach bearer token and active tenant header
 apiClient.interceptors.request.use(
   (config) => {
-    const token = getAccessToken();
-    if (token) {
-      config.headers['Authorization'] = `Bearer ${token}`;
+    // If request already has an explicitly set Authorization header (e.g. from retry), preserve it
+    const existingAuth = config.headers['Authorization'] || (config.headers?.get && config.headers.get('Authorization'));
+    if (!existingAuth) {
+      const token = currentAccessToken || getAccessToken() || sessionStorage.getItem('access_token');
+      if (token) {
+        if (config.headers?.set) {
+          config.headers.set('Authorization', `Bearer ${token}`);
+        } else {
+          config.headers['Authorization'] = `Bearer ${token}`;
+        }
+      }
     }
-    const tenantId = getActiveTenantId();
-    if (tenantId && !config.headers['X-Tenant-ID']) {
-      config.headers['X-Tenant-ID'] = tenantId;
+    const tenantId = currentTenantId || getActiveTenantId() || sessionStorage.getItem('active_tenant_id');
+    const existingTenant = config.headers['X-Tenant-ID'] || (config.headers?.get && config.headers.get('X-Tenant-ID'));
+    if (tenantId && !existingTenant) {
+      if (config.headers?.set) {
+        config.headers.set('X-Tenant-ID', tenantId);
+      } else {
+        config.headers['X-Tenant-ID'] = tenantId;
+      }
     }
     return config;
   },
@@ -81,7 +100,11 @@ apiClient.interceptors.response.use(
         failedQueue.push({ resolve, reject });
       })
         .then((token) => {
-          originalRequest.headers['Authorization'] = `Bearer ${token}`;
+          if (originalRequest.headers?.set) {
+            originalRequest.headers.set('Authorization', `Bearer ${token}`);
+          } else {
+            originalRequest.headers['Authorization'] = `Bearer ${token}`;
+          }
           return apiClient(originalRequest);
         })
         .catch((err) => Promise.reject(err));
@@ -97,11 +120,18 @@ apiClient.interceptors.response.use(
         { withCredentials: true }
       );
       const newAccessToken = res.data.access_token;
+      currentAccessToken = newAccessToken;
+      sessionStorage.setItem('access_token', newAccessToken);
       onTokenRefreshed(newAccessToken);
       processQueue(null, newAccessToken);
-      originalRequest.headers['Authorization'] = `Bearer ${newAccessToken}`;
+      if (originalRequest.headers?.set) {
+        originalRequest.headers.set('Authorization', `Bearer ${newAccessToken}`);
+      } else {
+        originalRequest.headers['Authorization'] = `Bearer ${newAccessToken}`;
+      }
       return apiClient(originalRequest);
     } catch (refreshErr) {
+      currentAccessToken = null;
       processQueue(refreshErr, null);
       onAuthFailed();
       return Promise.reject(refreshErr);

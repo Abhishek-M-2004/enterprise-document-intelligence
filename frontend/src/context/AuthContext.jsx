@@ -1,5 +1,5 @@
-import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
-import { authApi, configureApiAuth } from '../services/api';
+import React, { createContext, useContext, useEffect, useState, useCallback, useRef } from 'react';
+import { authApi, configureApiAuth, setApiAccessToken } from '../services/api';
 
 const AuthContext = createContext(null);
 
@@ -10,22 +10,33 @@ export function AuthProvider({ children }) {
   const [accessToken, setAccessToken] = useState(() => sessionStorage.getItem('access_token'));
   const [loading, setLoading] = useState(true);
 
+  const tokenRef = useRef(accessToken);
+  tokenRef.current = accessToken;
+  const tenantRef = useRef(currentTenant);
+  tenantRef.current = currentTenant;
+
   // Sync callbacks with Axios interceptors
   useEffect(() => {
     if (accessToken) {
       sessionStorage.setItem('access_token', accessToken);
+      setApiAccessToken(accessToken);
     } else {
       sessionStorage.removeItem('access_token');
+      setApiAccessToken(null);
     }
 
     configureApiAuth({
-      getAccessToken: () => accessToken || sessionStorage.getItem('access_token'),
-      getActiveTenantId: () => currentTenant?.tenant_id || currentTenant?.id || sessionStorage.getItem('active_tenant_id') || null,
+      getAccessToken: () => tokenRef.current || sessionStorage.getItem('access_token'),
+      getActiveTenantId: () => tenantRef.current?.tenant_id || tenantRef.current?.id || sessionStorage.getItem('active_tenant_id') || null,
       onTokenRefreshed: (newToken) => {
+        tokenRef.current = newToken;
+        setApiAccessToken(newToken);
         setAccessToken(newToken);
         if (newToken) sessionStorage.setItem('access_token', newToken);
       },
       onAuthFailed: () => {
+        tokenRef.current = null;
+        setApiAccessToken(null);
         setAccessToken(null);
         setUser(null);
         setCurrentTenant(null);
