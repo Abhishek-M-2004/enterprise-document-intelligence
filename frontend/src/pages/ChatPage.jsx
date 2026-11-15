@@ -671,7 +671,7 @@ export default function ChatPage() {
                                 >
                                   <FileText className="w-3 h-3 text-indigo-600" />
                                   <span className="truncate max-w-[140px]">
-                                    {c.document_title || 'Document'}
+                                    {c.filename || c.document_title || 'Document'}
                                   </span>
                                   {c.page_number && (
                                     <span className="text-indigo-500 font-mono">p.{c.page_number}</span>
@@ -760,7 +760,7 @@ export default function ChatPage() {
         onClose={() => setInspectCitation(null)}
         maxWidth="max-w-xl"
         title="Source Citation Verification"
-        description={inspectCitation?.document_title || 'Document passage excerpt'}
+        description={inspectCitation?.filename || inspectCitation?.document_title || 'Document passage excerpt'}
       >
         <div className="space-y-4">
           <div className="grid grid-cols-2 gap-3 text-xs font-mono">
@@ -774,8 +774,10 @@ export default function ChatPage() {
             <div className="p-2.5 bg-slate-50 rounded-lg border border-slate-200">
               <span className="text-[10px] text-slate-400 uppercase font-sans">Relevance Score</span>
               <p className="font-semibold text-indigo-600 mt-0.5">
-                {inspectCitation?.relevance_score
-                  ? (inspectCitation.relevance_score * 100).toFixed(1) + '%'
+                {inspectCitation?.score !== undefined && inspectCitation?.score !== null
+                  ? `${(inspectCitation.score * 100).toFixed(1)}%`
+                  : inspectCitation?.relevance_score
+                  ? `${(inspectCitation.relevance_score * 100).toFixed(1)}%`
                   : 'Grounded'}
               </p>
             </div>
@@ -786,7 +788,11 @@ export default function ChatPage() {
               Grounding Text Excerpt:
             </span>
             <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200/90 text-xs text-slate-800 leading-relaxed font-sans whitespace-pre-wrap max-h-60 overflow-y-auto">
-              {inspectCitation?.snippet || inspectCitation?.text || 'No text snippet available.'}
+              {inspectCitation?.relevant_passage ||
+                inspectCitation?.full_passage ||
+                inspectCitation?.snippet ||
+                inspectCitation?.text ||
+                'No text snippet available.'}
             </div>
           </div>
 

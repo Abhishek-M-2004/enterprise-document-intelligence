@@ -158,7 +158,32 @@ class MockLLMProvider(BaseLLMProvider):
         if "No relevant document passages were retrieved" in last_user_msg or not last_user_msg.strip():
             return "The requested information could not be found in the uploaded enterprise documents."
 
-        # Generate realistic grounded response citing [S1] and [S2] if present
+        # Parse retrieved document sources from the context prompt to ground mock answers in real text
+        import re
+        source_pattern = re.compile(
+            r"\[SOURCE:\s*(S\d+)\]\s*\nDocument:\s*([^\n]+)\s*\n(?:Page\s*([^\n]+))?\s*\nContent:\s*\n(.*?)(?=\n\[SOURCE:|\n\[/DOCUMENT CONTEXT\]|\Z)",
+            re.DOTALL,
+        )
+        matches = source_pattern.findall(last_user_msg)
+        if matches:
+            paragraphs = []
+            for tag, doc_name, page_str, content_text in matches[:3]:
+                lines = [line.strip() for line in content_text.strip().split("\n") if line.strip()]
+                clean_text = " ".join(lines)
+                sentences = [s.strip() for s in clean_text.split(".") if len(s.strip()) > 20]
+                if sentences:
+                    excerpt = sentences[0]
+                    paragraphs.append(f"{excerpt}. [{tag}]")
+                elif clean_text:
+                    paragraphs.append(f"{clean_text[:180]}... [{tag}]")
+
+            if paragraphs:
+                return (
+                    "Based on the retrieved enterprise policy documentation:\n\n"
+                    + "\n\n".join(f"• {p}" for p in paragraphs)
+                )
+
+        # Default fallback response citing [S1] and [S2] if present
         return (
             "Based on the provided enterprise documentation, the architecture implements multi-tenant "
             "isolation and secure document retrieval [S1]. The platform combines dense vector search with "
