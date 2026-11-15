@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   MessageSquare,
@@ -94,13 +94,16 @@ export default function ChatPage() {
     try {
       const res = await chatApi.listSessions();
       setSessions(res.data || []);
-      if (res.data && res.data.length > 0 && !activeSessionId) {
-        setActiveSessionId(res.data[0].id);
-      }
+      setActiveSessionId((current) => {
+        if (!current && res.data && res.data.length > 0) {
+          return res.data[0].id;
+        }
+        return current;
+      });
     } catch (err) {
       console.error('Failed to load chat sessions', err);
     }
-  }, [currentTenant?.tenant_id, currentTenant?.id, activeSessionId]);
+  }, [currentTenant?.tenant_id, currentTenant?.id]);
 
   useEffect(() => {
     loadSessions();
