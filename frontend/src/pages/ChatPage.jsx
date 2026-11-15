@@ -85,9 +85,12 @@ export default function ChatPage() {
     fetchDocs();
   }, [currentTenant?.tenant_id]);
 
+  const isSendingRef = useRef(false);
+
   // Load user sessions in current tenant
-  const loadSessions = async () => {
-    if (!currentTenant?.tenant_id) return;
+  const loadSessions = useCallback(async () => {
+    const tenantId = currentTenant?.tenant_id || currentTenant?.id || sessionStorage.getItem('active_tenant_id');
+    if (!tenantId) return;
     try {
       const res = await chatApi.listSessions();
       setSessions(res.data || []);
@@ -97,28 +100,40 @@ export default function ChatPage() {
     } catch (err) {
       console.error('Failed to load chat sessions', err);
     }
-  };
+  }, [currentTenant?.tenant_id, currentTenant?.id, activeSessionId]);
 
   useEffect(() => {
     loadSessions();
-  }, [currentTenant?.tenant_id]);
+  }, [loadSessions]);
 
-  // Load messages when active session changes
-  useEffect(() => {
-    if (!activeSessionId) {
+  const loadSessionMessages = useCallback(async (sessionId) => {
+    if (!sessionId) {
       setMessages([]);
       return;
     }
-    const loadSessionDetail = async () => {
-      try {
-        const res = await chatApi.getSession(activeSessionId);
-        setMessages(res.data.messages || []);
-      } catch (err) {
-        console.error('Failed to load session messages', err);
-      }
-    };
-    loadSessionDetail();
-  }, [activeSessionId]);
+    try {
+      const res = await chatApi.getSession(sessionId);
+      setMessages(res.data.messages || []);
+    } catch (err) {
+      console.error('Failed to load session messages', err);
+    }
+  }, []);
+
+  // Load messages when active session changes (unless we are actively sending a prompt)
+  useEffect(() => {
+    if (isSendingRef.current) {
+      return;
+    }
+    loadSessionMessages(activeSessionId);
+  }, [activeSessionId, loadSessionMessages]);
+
+  const handleSelectSession = (sessionId) => {
+    if (activeSessionId === sessionId) {
+      loadSessionMessages(sessionId);
+    } else {
+      setActiveSessionId(sessionId);
+    }
+  };
 
   // Create new session
   const handleCreateNewSession = async () => {
@@ -162,6 +177,10 @@ export default function ChatPage() {
     const prompt = inputMessage.trim();
     if (!prompt || isLoading) return;
 
+    isSendingRef.current = true;
+    setIsLoading(true);
+    setError(null);
+
     let currentSessionId = activeSessionId;
     if (!currentSessionId) {
       try {
@@ -174,6 +193,8 @@ export default function ChatPage() {
         setSessions((prev) => [newSessionRes.data, ...prev]);
       } catch (err) {
         setError('Failed to create chat session.');
+        setIsLoading(false);
+        isSendingRef.current = false;
         return;
       }
     }
@@ -186,8 +207,6 @@ export default function ChatPage() {
     };
     setMessages((prev) => [...prev, userMsg]);
     setInputMessage('');
-    setIsLoading(true);
-    setError(null);
 
     const payload = {
       content: prompt,
@@ -299,11 +318,26 @@ export default function ChatPage() {
                   tokenText = rawData;
                 }
                 accumulatedTokens += tokenText;
-                setMessages((prev) =>
-                  prev.map((m) =>
+                setMessages((prev) => {
+                  const hasMsg = prev.some((m) => m.id === assistantMsgId);
+                  if (!hasMsg) {
+                    return [
+                      ...prev,
+                      {
+                        id: assistantMsgId,
+                        role: 'assistant',
+                        content: accumulatedTokens,
+                        citations: [],
+                        message_metadata: {},
+                        isStreaming: true,
+                        created_at: new Date().toISOString(),
+                      },
+                    ];
+                  }
+                  return prev.map((m) =>
                     m.id === assistantMsgId ? { ...m, content: accumulatedTokens } : m
-                  )
-                );
+                  );
+                });
               } else if (currentEvent === 'done') {
                 try {
                   const parsed = JSON.parse(rawData);
@@ -337,11 +371,13 @@ export default function ChatPage() {
               : m
           )
         );
-        loadSessions();
+        await loadSessions();
+        await loadSessionMessages(currentSessionId);
       } catch (err) {
         setError(err.message || 'Error occurred during streaming generation.');
         setMessages((prev) => prev.filter((m) => m.id !== assistantMsgId));
       } finally {
+        isSendingRef.current = false;
         setIsLoading(false);
       }
     } else {
@@ -358,10 +394,12 @@ export default function ChatPage() {
           created_at: new Date().toISOString(),
         };
         setMessages((prev) => [...prev, assistantMsg]);
-        loadSessions();
+        await loadSessions();
+        await loadSessionMessages(currentSessionId);
       } catch (err) {
         setError(err.response?.data?.detail || 'Failed to generate answer.');
       } finally {
+        isSendingRef.current = false;
         setIsLoading(false);
       }
     }
@@ -411,7 +449,7 @@ export default function ChatPage() {
               return (
                 <div
                   key={s.id}
-                  onClick={() => setActiveSessionId(s.id)}
+                  onClick={() => handleSelectSession(s.id)}
                   className={`group flex items-center justify-between p-2.5 rounded-xl cursor-pointer text-xs transition select-none ${
                     isActive
                       ? 'bg-indigo-50/80 text-indigo-950 font-semibold border border-indigo-200/80 shadow-sm'
@@ -502,6 +540,19 @@ export default function ChatPage() {
             </button>
           </div>
         </div>
+
+        {/* Error Alert Banner */}
+        {error && (
+          <div className="mx-4 sm:mx-6 mt-3 p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 flex items-center justify-between animate-fadeIn">
+            <span>{error}</span>
+            <button
+              onClick={() => setError(null)}
+              className="text-rose-500 hover:text-rose-700 font-bold ml-2 text-sm leading-none"
+            >
+              ×
+            </button>
+          </div>
+        )}
 
         {/* Message Stream */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5">
