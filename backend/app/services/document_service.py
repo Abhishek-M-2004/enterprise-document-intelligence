@@ -16,7 +16,6 @@ from app.repositories.chunk_repository import ChunkRepository
 from app.repositories.document_repository import DocumentRepository
 from app.services.bm25_service import BM25Service
 from app.services.pdf_service import PDFProcessingError, PDFService
-from app.workers.celery_app import process_document
 
 logger = get_logger(__name__)
 
@@ -109,6 +108,7 @@ class DocumentService:
 
         # 7. Dispatch Celery asynchronous background task
         try:
+            from app.workers.celery_app import process_document
             process_document.delay(str(doc_id), str(tenant_id))
             logger.info(
                 f"Queued Celery ingestion task for document {doc_id}",
